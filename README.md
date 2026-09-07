@@ -15,9 +15,17 @@ component and no C++**. Everything needed to drive them is in this repository.
 | Panel | ST77922, quad SPI, 320x480 native portrait, RGB565 |
 | Touch | Sitronix controller integrated with the panel, I²C `0x55` |
 | USB | Native USB-Serial/JTAG, USB-C |
-| Also on board | ES8311 audio codec, SC8002B amplifier, microSD (4-bit SDIO), WS2812 RGB LED |
+| Also on board | ES8311 audio codec, SC8002B amplifier, microphone, microSD (4-bit SDIO), WS2812 RGB LED, lithium battery charging |
 
 Vendor page: <https://www.lcdwiki.com/3.5inch_ESP32-S3_Display>
+
+**If you bought this as something else, you are in the right place.** The same
+board is sold rebadged with no mention of LCDwiki or ES3C35P — on Amazon as
+*"Hosyond ESP32-S3 Touchscreen Module, 3.5" 240x320 IPS LCD EPS32 Display with
+WiFi Bluetooth Capacitive Touch Screen for Arduino IoT Projects"*
+([B0H28X8SQ4](https://www.amazon.com/dp/B0H28X8SQ4)). **The 240x320 in that
+title is wrong** — the same listing's own specifications say 320x480 RGB565,
+and that is what the panel does.
 
 ## Getting a picture on it
 

@@ -3,6 +3,15 @@
 3.5" ESP32-S3 display board, sold as **ES3C35P** (with speaker) or **ES3C35P-NS**
 (without). Vendor page: <https://www.lcdwiki.com/3.5inch_ESP32-S3_Display>.
 
+**It is also sold rebadged.** On Amazon it appears as *"Hosyond ESP32-S3
+Touchscreen Module, 3.5" 240x320 IPS LCD EPS32 Display with WiFi Bluetooth
+Capacitive Touch Screen for Arduino IoT Projects"*
+([B0H28X8SQ4](https://www.amazon.com/dp/B0H28X8SQ4)), which names neither
+LCDwiki nor ES3C35P anywhere. The 3.5" option ships with a speaker, so it is
+the `ES3C35P` rather than the `ES3C35P-NS`. **Ignore the 240x320 in that
+title** — the same listing's own specifications say 320x480 RGB565, which is
+what the hardware does.
+
 Every claim below carries a grade for how it was established. Vendor material
 for this board contains errors — a swapped UART row, a wrong touch address, two
 byte-different revisions of the same spec PDF that disagree with each other — so
@@ -35,6 +44,8 @@ The factory image itself is not distributed here — see
 | Touch | Sitronix controller integrated with the panel, I²C `0x55` | **probed** |
 | Audio codec | ES8311, I²C `0x18` | **probed** — answers the bus scan |
 | Amplifier | SC8002B | vendor |
+| Microphone | On board, routed through the ES8311 | vendor — untested |
+| Battery | External lithium connection with onboard charge management; sense on GPIO8 (ADC1_CH7) | vendor — untested |
 | Partition table | nvs, otadata, app0/app1 3MB each, ffat 9.875MB, coredump 64K | **firmware** — parsed at flash `0x8000` |
 
 ESPHome validates either PSRAM mode without complaint, so a config that
@@ -84,6 +95,10 @@ audio are unused.
 
 ### Corrections to vendor material
 
+- **The retail listing's resolution is wrong in its own title.** The Amazon
+  title says 240x320; the specification bullets on the same page say 320x480
+  RGB565. The panel is 320x480 — CASET and RASET in the board's own firmware
+  say so, and it draws correctly at that size.
 - **UART0 is printed backwards.** The vendor pin table gives `RXD0(IO43)` /
   `TXD0(IO44)`. In ESP32-S3 silicon U0TXD is GPIO43 and U0RXD is GPIO44. Use
   the silicon assignment.
