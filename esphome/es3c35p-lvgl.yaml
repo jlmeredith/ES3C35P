@@ -105,9 +105,9 @@ display:
     #
     draw_rounding: 4
     #
-    # THE CONTRACT (1). No rotation: here, and no lambda:, pages:,
-    # auto_clear_enabled: true or show_test_card: true either. LVGL rejects all
-    # of them outright:
+    # THE CONTRACT (1). No non-zero rotation: here (rotation: 0 validates but
+    # does nothing), and no lambda:, pages:, auto_clear_enabled: true or
+    # show_test_card: true either. LVGL rejects those outright:
     #
     #   "use of 'rotation' in the display config is not compatible with LVGL,
     #    please set rotation in the LVGL config instead"
@@ -116,8 +116,8 @@ display:
 
 # THE CONTRACT (2). No transform: and no calibration:, and that is not an
 # oversight. The touchscreen component caches the display's dimensions in its
-# own call_setup() at priority DATA (600), while LVGL runs at PROCESSOR-5
-# (395) — so it caches the UN-ROTATED 320x480 and reports points in the panel's
+# own call_setup() at priority DATA (600), while LvglComponent runs at
+# PROCESSOR (400) — so it caches the UN-ROTATED 320x480 and reports points in the panel's
 # native frame. LVGL's input-device callback then applies rotate_coordinates().
 # Adding swap_xy here would rotate the point twice.
 #
@@ -167,13 +167,15 @@ lvgl:
 
   # THE CONTRACT (4). 25%, not 100%, and this is a deliberate reversal of the
   # obvious call. 8MB of PSRAM makes a full 307,200-byte framebuffer trivially
-  # affordable — but LvglComponent::setup() only ATTEMPTS INTERNAL RAM when the
-  # requested fraction is small, so asking for 100% guarantees the draw buffer
-  # lands in PSRAM, where every CPU blend is slower. Drawing is the bottleneck
-  # on this board, not the bus, so the buffer wants to be fast to draw into
-  # rather than large. 25% is 76,800 bytes, fits internal SRAM, and LVGL only
-  # ever redraws dirty rectangles anyway. It falls back to PSRAM on its own if
-  # internal allocation fails.
+  # affordable — but LvglComponent::setup() only ATTEMPTS INTERNAL RAM FIRST
+  # when buffer_frac_ >= MIN_BUFFER_FRAC / 2. MIN_BUFFER_FRAC is 8 and
+  # buffer_frac_ is the denominator, so that threshold is exactly 25%: asking
+  # for anything larger skips the internal-RAM attempt and lands the draw buffer
+  # in PSRAM, where every CPU blend is slower. Drawing is the bottleneck on this
+  # board, not the bus, so the buffer wants to be fast to draw into rather than
+  # large. 25% is therefore the LARGEST buffer that still tries internal SRAM —
+  # 76,800 bytes. LVGL only redraws dirty rectangles anyway, and falls back to
+  # PSRAM on its own if the internal allocation fails.
   buffer_size: 25%
 
   pages:

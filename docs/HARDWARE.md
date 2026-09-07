@@ -13,15 +13,15 @@ title** — the same listing's own specifications say 320x480 RGB565, which is
 what the hardware does.
 
 Every claim below carries a grade for how it was established. Vendor material
-for this board contains errors — a swapped UART row, a wrong touch address, two
-byte-different revisions of the same spec PDF that disagree with each other — so
-knowing where a number came from matters as much as the number.
+for this board contains errors — a swapped UART row and a wrong touch I²C
+address — so knowing where a number came from matters as much as the number.
 
 | Grade | Meaning |
 |---|---|
-| **probed** | Measured on a physical unit over USB, or exercised under ESPHome with the expected physical result. |
+| **probed** | Measured over USB, or exercised under ESPHome with the expected physical result. **On one unit.** Nothing here is a sample of boards, so a claim that depends on panel lot or assembly variant may not generalise. |
 | **firmware** | Decoded from the board's own factory image (sha256 `cb90e3d2…9971cd`, 16MB). Byte offsets are given so a dump of your own can be checked against them. Shows what the shipped code intends, not what the copper does. |
-| **vendor** | From the wiki, spec PDF, schematic, or LCDwiki's published Arduino examples. |
+| **datasheet** | From the ST77922 controller datasheet (Sitronix Preliminary v0.1, [published by Espressif](https://dl.espressif.com/AE/esp-iot-solution/ST77922_SPEC_V0.1.pdf)). Page numbers are given. |
+| **vendor** | From the LCDwiki wiki, spec PDF, schematic, or LCDwiki's published Arduino examples. |
 | **inferred** | Deduced from other facts. Treat as a hypothesis. |
 
 The factory image itself is not distributed here — see
@@ -74,14 +74,14 @@ ESPHome and produced the expected physical effect.
 | LCD QSPI D0 / D1 / D2 / D3 | 11 / 13 / 14 / 9 | **probed** |
 | LCD reset | **tied to `EN` / CHIP_PU** — no independent reset line | **probed** — see [Reset](#the-panel-needs-a-real-power-on-reset) |
 | LCD backlight | 41, **active HIGH** | **probed** — driven to both rails; HIGH lights the panel |
-| LCD tearing effect (TE) | 42 | **firmware** — absent from every vendor pin table |
+| LCD tearing effect (TE) | 42 | **firmware** — the TE ISR registers GPIO42 in the factory image; absent from every vendor pin table. Not exercised here, since ESPHome has no TE support |
 | Touch I²C SDA / SCL | 38 / 39 | **probed** |
 | Touch reset | 48 | **probed** |
 | Touch interrupt | 47 | vendor — untried |
 | microSD (4-bit SDIO) CLK / CMD | 5 / 4 | vendor |
 | microSD D0 / D1 / D2 / D3 | 6 / 7 / 2 / 3 | vendor |
 | Audio I²S MCLK / BCLK / LRCLK | 17 / 18 / 21 | vendor |
-| Audio I²S DOUT / DIN | 15 / 16 | vendor — **disputed**, see below |
+| Audio I²S DOUT / DIN | 15 / 16 | vendor — untested, see below |
 | Amplifier shutdown (SC8002B) | 1 | vendor — **active LOW**, see below |
 | RGB LED, single-wire addressable | 40 | **probed** — WS2812, `channel_colors: GRB` |
 | Battery sense (ADC1_CH7) | 8 | vendor |
@@ -90,8 +90,9 @@ ESPHome and produced the expected physical effect.
 | Free expansion | 45 / 46 | vendor |
 
 **Touch, the ES8311 codec and the 4-pin expansion header share one physical I²C
-bus.** GPIO38 and GPIO39 are only available for other use if both touch and
-audio are unused.
+bus** (**probed** — one scan on GPIO38/39 answers for both `0x18` and `0x55`;
+the expansion header is **vendor**). GPIO38 and GPIO39 are only available for
+other use if both touch and audio are unused.
 
 ### Corrections to vendor material
 
@@ -105,9 +106,13 @@ audio are unused.
 - **The touch address is `0x55`, not `0x38`.** The spec PDF's `0x38` is wrong —
   nothing responds there. A bus scan finds `0x18`, `0x28` and `0x55`, and
   `0x55` answers every read.
-- **The I²S data direction is unresolved.** Two byte-different copies of the
-  spec PDF, both stamped `V1.0 / First Release / 2025-06-14`, disagree on which
-  of GPIO15 / GPIO16 is output and which is input. Determine it empirically.
+- **GPIO15 is I²S output and GPIO16 is input**, on every source that can be
+  checked: the wiki pin table, the spec PDF the vendor currently publishes
+  (sha256 `67c343bf…eed2e3`, stamped `V1.0 / First Release / 2025-06-14`), and
+  the merged xiaozhi port (`AUDIO_I2S_GPIO_DOUT GPIO_NUM_15`,
+  `AUDIO_I2S_GPIO_DIN GPIO_NUM_16`). A second copy of that PDF, stamped
+  identically, reverses them. Neither direction has been exercised here, so
+  take 15/16 as out/in and confirm before relying on it.
 - **Amplifier shutdown is active LOW.** The pin is named SHUTDOWN, the vendor
   table says "low level enable", and the xiaozhi ESP-IDF port for this board
   passes `pa_inverted = true`. Do not drive it high to enable.
@@ -121,35 +126,54 @@ audio are unused.
 ### Initialisation sequence
 
 The full sequence is in
-[`esphome/st77922-init-sequence.yaml`](../esphome/st77922-init-sequence.yaml):
-56 entries, ending at `RASET`.
+[`esphome/st77922-init-sequence.yaml`](../esphome/st77922-init-sequence.yaml).
+Under `init_sequence:` that file holds 59 items: a leading `delay 120ms`, the
+56 vendor commands (`0xF1` through `RASET`), then `11h SLPOUT` and a
+`delay 200ms`.
 
 It is a 63-entry `lcd_init_cmd_t` array in the factory image at `app0.bin
 0x0b3ec4`, reached through an `st77922_vendor_config_t` at `0x0b3e98` =
-`{init_cmds = 0x3c1a3ec4, init_cmds_size = 63, use_qspi = 1}`. A byte-identical
-copy sits at `0x0eb06c` in a different compilation unit.
+`{init_cmds = 0x3c1a3ec4, init_cmds_size = 63, use_qspi = 1}`. A second copy
+sits at `app0.bin 0x0eb06c` in a different compilation unit. The two decode to
+identical `{cmd, data, delay_ms}` tuples but are **not** byte-identical: each
+entry's `data` pointer differs, because each copy addresses its own parameter
+blobs (`app0.bin 0x100670–0x1007bb` and `0x100b2c–0x100c77`, no overlap). 126
+of the 1008 bytes differ, all of them pointer bytes.
+
+Each 16-byte record is `{cmd, data*, data_bytes, delay_ms}`, so **the dump
+carries the per-entry delays too**: entry 58 is `11h` with `delay_ms` 120 and
+entry 63 is `35h` with `delay_ms` 20, and every other entry is 0.
 
 The same table is published openly in LCDwiki's own Arduino examples
 ([ydedox/st77922](https://github.com/ydedox/st77922),
-`Example_01_Simple_test`), which is where the per-entry delays come from — the
-flash dump cannot give those. That file carries **two** complete 63-entry
-tables, an active one and a commented-out one directly above it: the two panel
-variants of this reference design. This board runs the **commented-out**
-variant (54 of 56 entries match) with two parameters taken from the active one
-(entry 18 `0x71`, entry 20 `0xBE`).
+`Example_01_Simple_test`). What that source uniquely provides is the **second
+variant**: the file carries two complete 63-entry tables, an active one and a
+commented-out one directly above it, for the two panel variants of this
+reference design. This board runs the **commented-out** variant (54 of 56
+entries match) with two parameters taken from the active one — `0x71` and
+`0xBE`, the 19th and 21st entries counting the array from one. Having both
+tables is what makes that decomposition provable.
 
 **A similar table at `app0.bin 0x0b43d0` is not this panel's.** It is the
 upstream `esp_lcd_st77922` driver's built-in default for a 532x300 panel —
 CASET/RASET `00 00 02 13` / `00 00 01 2b` — loaded only in the branch taken
-when `init_cmds` is NULL, which on this board it never is. The byte range
-around `0x1007c0` is a shared `.data` parameter pool feeding both tables, not a
-third sequence.
+when `init_cmds` is NULL, which on this board it never is. Its parameter blobs
+live in the same `.data` segment as this panel's but occupy a separate range;
+resolving every `data` pointer in all three arrays shows no blob is shared
+between any two of them.
 
-The last seven vendor entries — `21h INVON`, `11h SLPOUT`, `29h DISPON`,
-`2Ch RAMWR`, `3Ah COLMOD`, `36h MADCTL`, `35h TEON` — are deliberately absent
-from the published YAML. ESPHome appends its own equivalents and rejects a
-`3Ah` inside a user sequence. Express them through `invert_colors:`,
-`color_order:` and the LVGL rotation instead.
+Six of the last seven vendor entries — `21h INVON`, `29h DISPON`, `2Ch RAMWR`,
+`3Ah COLMOD`, `36h MADCTL`, `35h TEON` — are absent from the published YAML.
+`11h SLPOUT` is kept, moved to the end; see
+[the appended tail](#the-appended-slpout-tail-and-what-it-guarantees).
+
+ESPHome does not simply append an equivalent for all six. It appends `3Ah`,
+`21h`/`20h` and `29h`; it writes `36h MADCTL` at runtime from
+`reset_params_()` rather than inside the sequence; it issues `2Ch` on every
+write; and it has **no `35h TEON` equivalent at all**. It also rejects a `3Ah`
+inside a user sequence — unless that sequence contains a page-select (`0xFE`
+or `0xFF`), which switches the check off. Express the rest through
+`invert_colors:`, `color_order:` and the LVGL rotation.
 
 ### Panel parameters
 
@@ -159,13 +183,21 @@ from the published YAML. ESPHome appends its own equivalents and rejects a
 | Colour order | **RGB** (MADCTL `0x00`) | **probed** — corroborated by the vendor driver's `{0x36, {0x00}, 1, 0}` |
 | Inversion | **`invert_colors: true` is required** | **probed** |
 | Pixel format | RGB565. The vendor writes COLMOD `0x01`; the panel also accepts ESPHome's `0x55` | **probed** |
-| Draw alignment | **4 pixels.** The panel is dual-gate | **probed** — an 8px edge frame renders even on all four sides with all corner markers intact |
-| Clock | **40MHz probed working.** The datasheet ceiling is 62.5MHz; the factory firmware runs 80MHz, 28% over spec | **probed** at 40MHz |
+| Draw alignment | **4 pixels** | **datasheet** — §2.1 lists "GIP + Dual-Gate driving". Confirmed harmless on hardware, but not confirmed *necessary*: the test card repaints the whole frame, so `draw_rounding` never changes the window written (see below) |
+| Clock | **40MHz probed working.** The controller's write-clock ceiling is 62.5MHz; the factory firmware runs 80MHz, 28% over it | **datasheet** for the ceiling, **probed** at 40MHz |
 | Landscape | **`rotation: 270`** in the `lvgl:` block — MADCTL `0xA0` | **probed** — see [MADCTL and rotation](#madctl-and-rotation) |
 
-ESPHome offers 80 / 40 / 26.67MHz, so there is no in-spec-and-fast option.
-40MHz is the fastest legal divisor, and the SPI write is not the bottleneck —
-see [Performance](#performance).
+**`draw_rounding` is not established by the test card.** ESPHome's `fill()`
+marks the entire band dirty, and 320 and 480 are both already multiples of 4,
+so the window written is byte-identical at `draw_rounding` 1, 2 or 4 and no
+partial redraw ever occurs. The value comes from the dual-gate architecture and
+matches the Freenove PR; the photograph only shows that 4 does no harm.
+
+**40MHz is the fastest rate ESPHome can reach at or below 62.5MHz, not the only
+one.** ESP32 SPI rates are an 80MHz/N ladder with a 5% tolerance, so 26.67, 20,
+16MHz and downward are all selectable — there is simply nothing between 40 and
+80MHz. The SPI write is not the bottleneck anyway; see
+[Performance](#performance).
 
 ### MADCTL and rotation
 
@@ -175,8 +207,10 @@ clean and correctly proportioned landscape image that is **mirrored** — a
 transpose without the accompanying flip, which is exactly the result of MV
 landing and MX being dropped.
 
-That contradicts the claim, made by both the ESPHome PR for the Freenove board
-and the xiaozhi port, that the ST77922 cannot swap axes in hardware. It can.
+That contradicts the xiaozhi port, which asserts the swap is impossible —
+`static_assert(!DISPLAY_SWAP_XY, "ST77922 does not support swapping the X and Y
+axes")` in `main/boards/lcdwiki-es3c35p/lcdwiki-es3c35p.cc`. It can. (The
+Freenove PR makes no such statement; it simply declares the mirrors only.)
 
 **`rotation: 270` is the correct landscape value**, and it is what this
 configuration uses. It writes MADCTL `0xA0` (MV|MY) — MV transposes the axes
@@ -184,17 +218,25 @@ and MY supplies the flip that MX could not — and renders a correctly oriented,
 unmirrored 480x320 landscape image. `0xA0` is also the value the vendor's own
 Arduino driver computes for landscape (`LCD_Set_Rotation` case 3).
 
-That driver is internally inconsistent, so do not take it as a second source
-without reading the whole function: case 1 — the landscape case its own demo
-`setup()` calls — computes `0x44` (MX|MH) with no MV bit while still swapping
-width and height, which cannot produce a hardware axis swap. One of the two
-cases is dead code.
+The same driver's case 1 computes `0x44` with no MV bit while still swapping
+width and height. That is not a contradiction once MX is known to be
+non-functional — it is what a driver looks like when it was written against a
+part that ignores the bit.
 
-**Software rotation remains available and costs one line.** Adding
-`transform: disabled` to the display block forces ESPHome onto the software
-path regardless of what the controller can do. It is slower — every flushed
-rectangle is rotated on the CPU into a second buffer — but it is correct on any
-unit, which is why the upstream model declares only `{mirror_x, mirror_y}`.
+**Hardware rotation is all-or-nothing, which is why a shipped model should
+still choose software.** ESPHome's `DriverChip.has_hardware_transform` is an
+*equality* test against the full `{mirror_x, mirror_y, swap_xy}` set, not a
+subset test. A model cannot therefore offer the working 270 without also
+offering 90, and 90 on this silicon is the mirrored screen above — with nothing
+in the log to explain it, because QSPI writes are write-only and a controller
+ignoring a MADCTL bit is indistinguishable from one honouring it. Declaring
+only the mirrors costs a rotate buffer and some CPU per flush and is always
+correct, which is what the upstream model does.
+
+`model: CUSTOM` carries the full set, so a `CUSTOM` display with
+`lvgl: rotation: 270` does take the hardware path — that is what this
+repository's configuration uses. Adding `transform: disabled` to the display
+block forces software rotation instead.
 
 ---
 
@@ -220,7 +262,7 @@ Read off the controller itself at setup:
 |---|---|---|
 | Max touches | **5** | Read from `ST7123_REG_MAX_TOUCHES`. The driver's own default is 10, so this is the chip's answer, not a default. |
 | Raw X / Y range | **320 / 480** | Matches panel native. No scaling needed. |
-| Status register | `0` on first read | The 100ms TTPRT reset hazard does not fire here — ESPHome's 5ms pulse plus 30ms settle is sufficient on this board. |
+| Status register | `0` on first read | ESPHome's 5ms reset pulse plus 30ms settle is sufficient on this board — the driver never reports `Failed to read status register`. No ST7123 datasheet is cited here, so treat any specific reset-timing minimum as unestablished. |
 
 Live touches map straight through with no calibration; `x_raw` runs one count
 above `x`, which is the driver's own coordinate mapping rather than an offset
@@ -244,15 +286,17 @@ successfully recovered`), consistent with the un-reset touch controller holding
 SDA low.
 
 **`0x28` is undocumented.** It appears and disappears exactly with `0x55`, so
-it belongs to the touch controller — most plausibly its ISP / bootloader
-address, which is common on Sitronix parts. It is not needed for operation.
+it belongs to the touch controller (**probed**). What it is for is **not
+established** — no datasheet consulted here names it. It is not needed for
+operation.
 
 ---
 
 ## ESPHome
 
-Verified against **ESPHome 2026.8.2**. The `st7123` platform landed 2026-07-02,
-so nothing here applies to earlier releases.
+Verified against **ESPHome 2026.8.2**; every file and line reference below is
+to that version. The `st7123` touch platform first shipped in **2026.7.0**, so
+that is the floor for the touch half.
 
 There is no `ST77922` display model and no `st77922` touchscreen platform in
 ESPHome. Neither is needed:
@@ -290,8 +334,9 @@ display:
     <<: !include st77922-init-sequence.yaml
 ```
 
-`mipi_spi` has **no backlight support**. GPIO41 must be driven separately — a
-`ledc` output plus a `monochromatic` light, or the display's `enable_pin:`.
+`mipi_spi` has **no backlight dimming or runtime control**. Its `enable_pin:`
+can hold GPIO41 on, but anything more — brightness, turning the panel off —
+needs a separate `ledc` output plus a `monochromatic` light.
 
 `mipi_spi` has **no TE support**. The factory firmware builds a whole GPIO42
 tearing-effect subsystem with an ISR and two semaphores; ESPHome has no
@@ -300,8 +345,9 @@ equivalent, so expect tearing on full-frame redraws.
 ### LVGL
 
 **Rotation goes in the `lvgl:` block, never the display block.** With LVGL
-present, ESPHome rejects `rotation:` on a display outright, along with
-`lambda:`, `pages:`, `auto_clear_enabled: true` and `show_test_card: true`
+present, ESPHome rejects any **non-zero** `rotation:` on a display (`rotation: 0`
+validates and is simply redundant), and rejects `lambda:`, `pages:`,
+`auto_clear_enabled: true` and `show_test_card: true` outright
 (`components/lvgl/__init__.py`, `final_validation`).
 
 ```yaml
@@ -326,8 +372,8 @@ otherwise:
 
 2. **The touchscreen needs no `transform:` and no `calibration:`.** The
    touchscreen component caches the display's dimensions in its own
-   `call_setup()` at priority `DATA` (600), while LVGL runs at `PROCESSOR-5`
-   (395) — so it caches the **un-rotated** 320x480 and reports points in the
+   `call_setup()` at priority `DATA` (600), while `LvglComponent` runs at
+   `PROCESSOR` (400) — so it caches the **un-rotated** 320x480 and reports points in the
    panel's native frame. LVGL's input-device callback then applies
    `rotate_coordinates()`. **Adding `swap_xy` here rotates twice.** If touches
    come out transposed, the rotation direction is wrong, not the touch config.
@@ -345,27 +391,37 @@ wants to be fast to draw into rather than large. 25% is 76,800 bytes, fits
 internal SRAM, and LVGL only ever redraws dirty rectangles anyway. It falls
 back to PSRAM on its own if internal allocation fails.
 
-### SLPOUT needs 120ms; ESPHome allows 10ms
+### The appended SLPOUT tail, and what it guarantees
 
-`mipi_spi` appends `11h SLPOUT`, `delay(10)`, `29h DISPON` to every sequence.
-This panel wants ~120ms after SLPOUT — the vendor's own table pairs it with
-`{0x11, ..., 0, 120}`. Ten milliseconds leaves the booster unready and the
-panel lights but renders black.
+`mipi_spi` appends `delay(0)`, `11h SLPOUT`, `delay(10)`, `29h DISPON` to every
+sequence. **The `delay(0)` is not a no-op.** `mipi_spi` records `millis() + 120`
+before running the sequence, and a zero delay sleeps until that instant — so
+the appended SLPOUT is already guaranteed to land at least 120ms after the
+reset.
 
-You cannot inject a delay into ESPHome's appended tail. **Pre-empt it:** issue
-`11h` yourself at the end of your own `init_sequence` and follow it with a
-delay. ESPHome's later SLPOUT is then a no-op on an already-woken panel.
+That is the requirement the datasheet actually states. Sleep Out cannot be sent
+for 120ms after reset (p.60 note 7, and SWRESET p.181), but only **5ms** is
+required between SLPOUT and the next command (p.190). ESPHome allows 10ms
+there, which is twice the requirement.
+
+So the framework's timing is datasheet-correct, and a 10ms post-SLPOUT wait is
+**not** a cause of a black panel. This configuration still issues `11h` at the
+end of its own `init_sequence` followed by `delay 200ms`, matching the margin
+in the vendor's own table (`{0x11, ..., 0, 120}`) and making ESPHome's later
+SLPOUT a no-op on an already-woken panel:
 
 ```yaml
   - [0x11]
   - delay 200ms
 ```
 
+That is belt and braces, not a fix for a framework defect. **A black panel with
+a clean log on this board is far more likely to be
+[the missing power-on reset](#the-panel-needs-a-real-power-on-reset)**, which
+produces an identical symptom and is not a timing problem at all.
+
 The syntax needs a unit — `delay 200ms`, not `delay 200` — and the value is
 capped at 255ms.
-
-Reported upstream as
-[esphome/esphome#19010](https://github.com/esphome/esphome/issues/19010).
 
 ### COLMOD cannot be overridden, and does not need to be
 
@@ -376,7 +432,8 @@ either way.
 
 This is not a problem. The panel renders correct RGB565 from `0x55`; the
 vendor's `0x01` is one valid encoding rather than the only one. The in-tree
-`st77916` model is a QSPI Sitronix panel driven through the identical path.
+`ESP-VOCAT` model, in `models/st77916.py`, is a QSPI Sitronix panel driven
+through the identical path.
 
 ---
 
@@ -398,12 +455,17 @@ full frames clock out in 28ms, the backlight is confirmed lit — and the screen
 is black. Nothing in the log is wrong, because SPI writes are write-only and
 always "succeed".
 
-The tell is that `invert_colors: true` makes no difference. If pixel data were
-the problem but commands were landing, inversion over an all-zero panel RAM
-would give a **white** screen. Black under INVON means no command is reaching
-the panel at all: it is still in its power-on default of sleep-in, display-off.
+**There is no log-side tell, and INVON is not one.** A panel that stays black
+under `invert_colors: true` has *not* thereby proved that commands are failing
+to arrive. Per the datasheet, sleep-in stops the DC/DC converter, the internal
+oscillator and panel scanning (p.189), and `28h DISPOFF` blanks the output
+independently — so a panel that received every command and is simply not
+scanning renders black exactly like one that received none. Inversion only
+changes what is scanned out, so it says nothing when nothing is being scanned.
 
-Fix: unplug the USB-C cable, wait ~10s, plug it back in.
+Treat the black screen as ambiguous and settle it the cheap way: **power-cycle
+first**, before touching the init sequence. Fix: unplug the USB-C cable, wait
+~10s, plug it back in.
 
 **This is a bring-up rule, not an operating rule.** Once the panel has had one
 power-on init, soft reboots are fine — an OTA re-initialises it cleanly
@@ -427,8 +489,13 @@ the same build — a 38-minute gap between them has been observed. When a change
 refuses to appear on the device, upload the OTA image explicitly:
 
 ```bash
-esphome upload es3c35p-diag.yaml --device <ip> --file .esphome/build/<name>/.pioenvs/<name>/firmware.ota.bin
+esphome upload es3c35p-diag.yaml --device <ip> --file .esphome/build/<name>/build/firmware.ota.bin
 ```
+
+Both configs here use the native ESP-IDF toolchain, which is the 2026.8.2
+default for `esp32`. Its outputs are `.esphome/build/<name>/build/<name>.bin`
+and `.../build/firmware.ota.bin`. `.pioenvs/` is the PlatformIO layout and does
+not exist under this toolchain.
 
 ### Backlight polarity cannot be settled by eye
 
@@ -438,9 +505,16 @@ it glows.
 
 ### Long flash reads drop over native USB
 
-Read in 256KB chunks at **230400 baud**. 921600 and 460800 both fail around
-40%. Writes at 230400 are fine — a full 949KB image writes and verifies in
-6.1s.
+**Read the 16MB image in 256KB chunks.** A single whole-image read drops
+partway. Chunking is what completed here; a full-image read did not.
+
+Do not read anything into the `--baud` value. This board's port is the
+ESP32-S3's own USB-Serial/JTAG peripheral, i.e. a CDC virtual port whose line
+rate the host records and the link never uses. esptool applies `--baud`
+unconditionally, so the number can be set and appears to matter, but it does
+not gate throughput — a 949KB application image writing and verifying in 6.1s
+is ~155kB/s, roughly seven times what 230400 baud could carry. If long reads
+drop for you, chunk them; changing the baud rate is not the lever.
 
 ### Do not run the logger at VERBOSE
 
@@ -487,13 +561,18 @@ this document was written from.
 
 ### Dump yours before flashing anything
 
-There is exactly one chance, and it does not reopen.
+There is exactly one chance, and it does not reopen. Read it in 256KB chunks —
+a single whole-image read drops partway:
 
 ```bash
-esptool --port /dev/cu.usbmodem* --baud 230400 read-flash 0x0 0x1000000 stock-firmware-ES3C35P.bin
+for i in $(seq 0 63); do
+  off=$(printf '0x%x' $((i * 0x40000)))
+  esptool --port /dev/cu.usbmodem* read-flash $off 0x40000 "chunk-$(printf '%02d' $i).bin"
+done
+cat chunk-*.bin > stock-firmware-ES3C35P.bin
 ```
 
-Expect that to drop partway; read it in 256KB chunks instead.
+Then check the size is exactly 16777216 bytes and take its sha256.
 
 ### Writing it back
 
@@ -501,13 +580,16 @@ BOOT is GPIO0 and RESET acts on CHIP_PU — hold BOOT while tapping RESET to
 force download mode.
 
 ```bash
-esptool --port /dev/cu.usbmodem* --baud 230400 write-flash \
+esptool --port /dev/cu.usbmodem* write-flash \
   --flash-size keep --flash-mode keep --flash-freq keep \
   0x0 stock-firmware-ES3C35P.bin
 ```
 
-`keep` preserves the mode, size and frequency already encoded in the dump's own
-bootloader header (`qio120`, 16MB).
+`keep` preserves whatever the dump's own bootloader header already encodes. On
+this image those bytes are `e9 04 02 4f`: **DIO**, 16MB, 80MHz — *not* the
+`qio120` in the sketch's FQBN. The two are not in conflict; the ROM bootloader
+reads the header in DIO and the application switches the bus afterwards.
+Passing `keep` is what avoids having to care.
 
 If your system `esptool` is broken, ESPHome bundles a working one — invoke it
 through ESPHome's own interpreter as `python -m esptool`.
@@ -521,23 +603,30 @@ through ESPHome's own interpreter as `python -m esptool`.
   useful single source. `Example_01_Simple_test` carries the complete driver in
   two files: `spi_dev.h` confirms the pinout independently (CS 10, BL 41, SCLK
   12, D0–D3 = 11/13/14/9, 80MHz, `SPI_MODE0`, 320x480), and `Simple_test.ino`
-  carries the init table **with per-entry delays**, which the flash dump cannot
-  provide.
+  carries **two** complete 63-entry init tables — an active one and a
+  commented-out one — which is what makes this board's variant identifiable.
+  (The per-entry delays are in the flash dump too; the Arduino source is not
+  needed for those.)
 - **[esphome/esphome#18411](https://github.com/esphome/esphome/pull/18411)** —
   Freenove FNK0104N support: a full ST77922 touch component plus a `mipi_spi`
   model at 320x480, `draw_rounding: 4`, 80MHz, and a 200ms settle delay. Closed
   unmerged on process grounds — `boards.py` is generated and must not be
   hand-edited, and a PR should touch one component — with no reviewer disputing
-  the logic. Its init table differs from this board's in 8 of 12 sampled
-  parameter blobs, so it is a template rather than a drop-in.
+  the logic. Diffed in full rather than sampled: of the 54 command entries the
+  two tables share, 45 are identical and **9 differ** (`0x70`, `0x90`, `0x91`,
+  `0x92`, `0x93`, `0x96`, `0x97`, `0xBA`, `0x86`), and the FNK0104N table
+  carries no `2Ah`/`2Bh` at all. It is a template rather than a drop-in.
 - **[78/xiaozhi-esp32#2112](https://github.com/78/xiaozhi-esp32/pull/2112)** —
   a merged ESP-IDF port of this exact board at `main/boards/lcdwiki-es3c35p/`.
   Independent corroboration of the pinout and the `0x55` register map. It does
   **not** invert colours, which is wrong for this panel.
 - **[espressif/arduino-esp32#12694](https://github.com/espressif/arduino-esp32/issues/12694)**
   — someone on the same N16R8 ST77922 board who erased the factory firmware and
-  wanted working example code. Open, no comments, no resolution. Useful only as
-  confirmation that no official example exists.
+  wanted working example code. **This is where the vendor Arduino examples
+  surfaced**: ydedox posted <https://github.com/ydedox/st77922> there on
+  2026-06-23 and the issue was closed the same day. Worth reading in full — it
+  also points at Espressif's `ESP32_Display_Panel` and the `esp_lcd_st77922`
+  IDF component.
 - `components/mipi_spi/models/st77916.py` in the ESPHome tree — the closest
   in-tree precedent, and evidence that a QSPI Sitronix panel works through this
   exact framework path.

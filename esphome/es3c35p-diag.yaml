@@ -5,8 +5,10 @@
 #
 #   RGB LED green  -> MCU reached user code (works even with a dead panel)
 #   backlight 100% -> separates "dark backlight" from "failed panel init"
-#   test pattern   -> COLMOD acceptance, colour order, inversion, geometry,
-#                     offset and draw alignment, all from one photograph
+#   test pattern   -> COLMOD acceptance, colour order, inversion, geometry and
+#                     offset, all from one photograph. It does NOT exercise
+#                     draw_rounding: fill() dirties the whole frame every
+#                     update, so the window written is identical at 1, 2 or 4.
 #   i2c scan       -> pin correctness and pull-ups, with the ES8311 at 0x18 as
 #                     a built-in positive control for the bus itself
 #   st7123 touch   -> reports max touches and raw X/Y range in dump_config
@@ -37,8 +39,9 @@ esphome:
             red: 0%
             green: 100%
             blue: 0%
-        # Backlight BEFORE the display. GPIO41 is active HIGH, so maximum duty
-        # is lit.
+        # GPIO41 is active HIGH, so maximum duty is lit. This runs at the same
+        # setup priority as the display (DATA, 600), so it is not guaranteed to
+        # precede it — it only needs to happen, not to be first.
         - light.turn_on:
             id: backlight
             brightness: 100%
@@ -115,18 +118,21 @@ display:
     model: CUSTOM
     bus_mode: quad
     cs_pin: GPIO10
-    # 40MHz is the only ESPHome divisor under the datasheet's 62.5MHz write
-    # ceiling. The factory firmware runs 80MHz — 28% over spec — and the bus is
-    # not the bottleneck anyway.
+    # 40MHz is the fastest rate ESPHome can reach at or below the datasheet's
+    # 62.5MHz write ceiling. ESP32 SPI rates are an 80MHz/N ladder, so the next
+    # step down is 26.67MHz and nothing between 40 and 80MHz is selectable. The
+    # factory firmware runs 80MHz — 28% over spec — and the bus is not the
+    # bottleneck anyway.
     data_rate: 40MHz
     dimensions:
       width: 320
       height: 480
     color_order: RGB
     invert_colors: true
-    # The ST77922 is dual-gate and needs 4-pixel alignment. A wrong value
-    # corrupts partial redraws intermittently, which reads exactly like a bus
-    # or clock fault.
+    # The ST77922 is dual-gate (datasheet §2.1) and wants 4-pixel alignment.
+    # This test card cannot demonstrate that — it repaints the whole frame, and
+    # 320/480 are already multiples of 4. The value matters for partial
+    # redraws, which this config never performs.
     draw_rounding: 4
     # Bring up at 0. Rotation belongs in the lvgl: block once LVGL is present;
     # see es3c35p-lvgl.yaml.

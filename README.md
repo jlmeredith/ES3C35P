@@ -50,9 +50,16 @@ display:
     draw_rounding: 4
     <<: !include st77922-init-sequence.yaml
 
+i2c:
+  - id: bus_a
+    sda: GPIO38
+    scl: GPIO39
+    frequency: 400kHz
+
 touchscreen:
   - platform: st7123
     id: touch
+    i2c_id: bus_a
     address: 0x55
     reset_pin: GPIO48
     display: lcd
@@ -62,17 +69,18 @@ The backlight is **GPIO41, active HIGH**, and `mipi_spi` has no backlight
 support — drive it separately with a `ledc` output.
 
 The panel is native portrait. For a 480x320 landscape UI use `rotation: 270`
-**in the `lvgl:` block** — rotation on the display block is rejected outright
-when LVGL is present, and 90 comes out mirrored because this controller
-honours MADCTL MV but ignores MX.
+**in the `lvgl:` block** — a non-zero rotation on the display block is rejected
+when LVGL is present, and 90 comes out mirrored because this controller honours
+MADCTL MV but ignores MX.
 
 **Then physically unplug the board.** The LCD reset line is tied to CHIP_PU, so
 a reset over USB does not reset the panel. Coming off other firmware it will
 stay black with a completely clean log until it gets one real power-on reset.
 This is the single most likely reason a first flash appears to do nothing.
 
-Requires **ESPHome 2026.8.2 or later** — the `st7123` touch platform landed
-2026-07-02.
+Needs **ESPHome 2026.7.0 or later** for the `st7123` touch platform. Everything
+here was verified on **2026.8.2**, which is the version the source references in
+[`docs/HARDWARE.md`](docs/HARDWARE.md) are pinned to.
 
 ## What is here
 

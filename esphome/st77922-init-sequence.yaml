@@ -7,10 +7,17 @@
 # PROVENANCE. This is the table the panel actually runs. The board's factory
 # firmware carries it as a 63-entry lcd_init_cmd_t array at app0.bin 0x0b3ec4,
 # reached through an st77922_vendor_config_t at 0x0b3e98 = {init_cmds =
-# 0x3c1a3ec4, init_cmds_size = 63, use_qspi = 1}; a byte-identical copy sits at
-# 0x0eb06c in a different compilation unit. The same table is published openly
-# in LCDwiki's own Arduino examples (github.com/ydedox/st77922,
-# Example_01_Simple_test), which is the source of the per-entry delays.
+# 0x3c1a3ec4, init_cmds_size = 63, use_qspi = 1}. A second copy sits at
+# 0x0eb06c in a different compilation unit; the two decode to identical
+# {cmd, data, delay_ms} tuples but are not byte-identical, because each entry's
+# data pointer addresses that copy's own parameter blobs.
+#
+# The same table is published openly in LCDwiki's own Arduino examples
+# (github.com/ydedox/st77922, Example_01_Simple_test). That source is what makes
+# this board's variant identifiable — it carries two complete 63-entry tables,
+# one active and one commented out. It is NOT the source of the delays: each
+# 16-byte firmware record is {cmd, data*, data_bytes, delay_ms} and the dump
+# carries them too (entry 58 = 11h/120ms, entry 63 = 35h/20ms, all others 0).
 #
 # THE DECOY. A similar 60-entry table at app0.bin 0x0b43d0 is the upstream
 # esp_lcd_st77922 driver's built-in default for a 532x300 panel — its
@@ -18,25 +25,33 @@
 # taken when init_cmds is NULL, which on this board it never is. Do not copy it.
 #
 # THE TRIM. The vendor array has 63 entries; this file carries the first 56,
-# ending at RASET. The final seven — 21h INVON, 11h SLPOUT, 29h DISPON, 2Ch
-# RAMWR, 3Ah COLMOD, 36h MADCTL, 35h TEON — are omitted because ESPHome appends
-# its own tail and hard-rejects a 3Ah inside a user sequence. Express them
-# through invert_colors:, color_order: and the LVGL rotation instead.
+# ending at RASET, and then re-adds 11h SLPOUT at the end (see below). The other
+# six of the final seven — 21h INVON, 29h DISPON, 2Ch RAMWR, 3Ah COLMOD,
+# 36h MADCTL, 35h TEON — are omitted. ESPHome supplies 3Ah, 21h and 29h itself,
+# writes MADCTL at runtime from reset_params_() rather than in the sequence,
+# issues 2Ch on every write, and has no 35h TEON equivalent at all. It also
+# rejects a 3Ah inside a user sequence. Express the rest through
+# invert_colors:, color_order: and the LVGL rotation.
 #
-# THE TAIL COMPENSATION. The two entries marked below are not in the vendor
-# array. ESPHome prepends SWRESET + 10ms and appends 11h SLPOUT, 10ms, 29h
-# DISPON. Sitronix parts want ~120ms after both SWRESET and SLPOUT; 10ms leaves
-# the booster unready and the panel lights but renders black. Issuing SLPOUT
-# here and settling behind it makes ESPHome's later SLPOUT a no-op on an
-# already-woken panel, and its DISPON then arrives well after the panel is
-# ready. `delay N` requires a unit and is capped at 255ms.
+# THE TAIL. ESPHome appends delay(0), 11h SLPOUT, delay(10), 29h DISPON. The
+# delay(0) is not a no-op — mipi_spi records millis()+120 before running the
+# sequence and a zero delay sleeps until that instant, so the appended SLPOUT
+# already lands >=120ms after reset, which is what the ST77922 datasheet
+# actually requires (p.60 note 7, SWRESET p.181). Only 5ms is required between
+# SLPOUT and the next command (p.190), and ESPHome allows 10ms.
+#
+# So the two entries below are margin, not a fix: they match the 120ms the
+# vendor's own table pairs with SLPOUT, and make ESPHome's later SLPOUT a no-op
+# on an already-woken panel. A black panel with a clean log on this board is far
+# more likely to be the missing power-on reset (LCD reset is tied to CHIP_PU)
+# than any timing here. `delay N` requires a unit and is capped at 255ms.
 #
 # COLMOD. The vendor writes 0x01 and ESPHome writes 0x55 unconditionally. The
 # panel accepts either and renders correct RGB565 from both, so the fact that
 # 0x55 cannot be overridden from YAML in quad mode does not matter.
 
 init_sequence:
-  - delay 120ms # tail compensation: settle after ESPHome's SWRESET + 10ms
+  - delay 120ms # margin after ESPHome's prepended software reset
   - [0xF1, 0x00]
   - [0x60, 0x00, 0x00, 0x00]
   - [0x65, 0x80]
@@ -93,8 +108,9 @@ init_sequence:
   - [0xD0, 0x00]
   - [0x2A, 0x00, 0x00, 0x01, 0x3F]
   - [0x2B, 0x00, 0x00, 0x01, 0xDF]
-  # tail compensation: vendor entry 58 is 11h SLPOUT. Issuing it here gives the
-  # panel a real settle before ESPHome's DISPON, which follows its own appended
-  # SLPOUT by only 10ms.
+  # Vendor entry 58 is 11h SLPOUT, paired in the vendor table with a 120ms
+  # delay. Issued here to keep that margin; ESPHome's own appended SLPOUT then
+  # lands on an already-woken panel. See THE TAIL above — this is margin, not a
+  # workaround for a framework defect.
   - [0x11]
   - delay 200ms
