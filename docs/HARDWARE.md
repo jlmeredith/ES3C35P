@@ -391,6 +391,43 @@ wants to be fast to draw into rather than large. 25% is 76,800 bytes, fits
 internal SRAM, and LVGL only ever redraws dirty rectangles anyway. It falls
 back to PSRAM on its own if internal allocation fails.
 
+### Material Design Icons codepoints
+
+A `font:` block that subsets an MDI face needs codepoints, not names, and those
+are the easiest thing in an LVGL config to get quietly wrong: a codepoint typed
+from memory renders a plausible but incorrect glyph rather than an error. The
+first pass at this board's UI did exactly that, and had `television` wrong.
+
+Derive them from the webfont's own CSS instead, pinning the same version the
+`font:` block loads. This emits a name to codepoint map — 7,448 icons out of
+`@mdi/font@7.4.47`:
+
+```bash
+curl -sL https://cdn.jsdelivr.net/npm/@mdi/font@7.4.47/css/materialdesignicons.min.css -o mdi.css
+python3 - mdi.css > mdi_icons.json <<'PY'
+import re, sys, json
+css = open(sys.argv[1]).read()
+pairs = re.findall(r'\.mdi-([a-z0-9-]+)::before\{content:"\\([0-9A-Fa-f]+)"', css)
+print(json.dumps(dict(sorted(pairs)), indent=2))
+PY
+```
+
+`esphome/mdi_icons.json` is the subset these configs actually draw with rather
+than the whole face, because a glyph subset is cheap where a face of several
+thousand is not. To add an icon, look its name up in the generated map and copy
+the entry across — never type the hex.
+
+Two things that bite downstream:
+
+- **Pin the same `@mdi/font` version in the map and in the `font:` `file:`.**
+  They are independent downloads, and a codepoint that moved between releases
+  fails as a wrong glyph, not as a build error.
+- **Emit the glyph as explicit UTF-8 byte escapes** — `"\xF3\xB0\x8C\x99"` —
+  wherever it travels through generated C++. These codepoints sit in Unicode's
+  supplementary private use area and pass through a generated header, a
+  compiler and a linker; escapes survive all three whatever the source encoding
+  flags say, and a pasted character does not.
+
 ### The appended SLPOUT tail, and what it guarantees
 
 `mipi_spi` appends `delay(0)`, `11h SLPOUT`, `delay(10)`, `29h DISPON` to every
