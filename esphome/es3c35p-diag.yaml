@@ -1,0 +1,224 @@
+# ES3C35P — bring-up diagnostic
+#
+# Layered so that each stage disambiguates the next. One boot tells you which
+# half of the board is broken:
+#
+#   RGB LED green  -> MCU reached user code (works even with a dead panel)
+#   backlight 100% -> separates "dark backlight" from "failed panel init"
+#   test pattern   -> COLMOD acceptance, colour order, inversion, geometry,
+#                     offset and draw alignment, all from one photograph
+#   i2c scan       -> pin correctness and pull-ups, with the ES8311 at 0x18 as
+#                     a built-in positive control for the bus itself
+#   st7123 touch   -> reports max touches and raw X/Y range in dump_config
+#   BOOT button    -> proves the log path end to end
+#
+# Deliberately excluded: any rotation other than 0, any transform:, any TE
+# handling, any audio. Add those once the panel is known good.
+#
+# Requires secrets.yaml with wifi_ssid, wifi_password, api_encryption_key and
+# ota_password. Provenance for every hardware claim: ../docs/HARDWARE.md.
+
+substitutions:
+  name: es3c35p-diag
+
+esphome:
+  name: ${name}
+  friendly_name: ES3C35P Diagnostic
+  on_boot:
+    # 600 runs after every component with setup_priority > 600 — LEDC output
+    # (800), LightState (799) and esp32_rmt_led_strip (800) are all up by then.
+    - priority: 600
+      then:
+        # Liveness beacon first: green means the MCU reached user code even if
+        # the panel never lights.
+        - light.turn_on:
+            id: status_led
+            brightness: 30%
+            red: 0%
+            green: 100%
+            blue: 0%
+        # Backlight BEFORE the display. GPIO41 is active HIGH, so maximum duty
+        # is lit.
+        - light.turn_on:
+            id: backlight
+            brightness: 100%
+        - logger.log: "on_boot 600: LED green, backlight 100%"
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+# ignore_not_found: false is the point. ESPHome validates either PSRAM mode
+# without complaint, so only a runtime boot failure proves the mode is wrong.
+psram:
+  mode: octal
+  speed: 80MHz
+  ignore_not_found: false
+
+logger:
+  # DEBUG keeps every line that matters — the mipi_spi command dump, the st7123
+  # status and dimension reads — while dropping per-byte I2C traffic. Do not
+  # use VERBOSE: it prints the WiFi PSK in clear text.
+  level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# --- RGB LED liveness beacon (GPIO40) -----------------------------------
+light:
+  - platform: esp32_rmt_led_strip
+    id: status_led
+    name: "Status LED"
+    pin: GPIO40
+    num_leds: 1
+    chipset: WS2812
+    channel_colors: GRB
+    restore_mode: ALWAYS_OFF
+
+  # --- Backlight (GPIO41), driven before the display ---------------------
+  - platform: monochromatic
+    id: backlight
+    name: "Backlight"
+    output: backlight_pwm
+    restore_mode: ALWAYS_OFF
+
+output:
+  - platform: ledc
+    id: backlight_pwm
+    pin: GPIO41
+    frequency: 1000Hz
+
+# --- Display -------------------------------------------------------------
+spi:
+  - id: lcd_bus
+    type: quad
+    clk_pin: GPIO12
+    data_pins: [GPIO11, GPIO13, GPIO14, GPIO9]
+
+display:
+  - platform: mipi_spi
+    id: lcd
+    spi_id: lcd_bus
+    model: CUSTOM
+    bus_mode: quad
+    cs_pin: GPIO10
+    # 40MHz is the only ESPHome divisor under the datasheet's 62.5MHz write
+    # ceiling. The factory firmware runs 80MHz — 28% over spec — and the bus is
+    # not the bottleneck anyway.
+    data_rate: 40MHz
+    dimensions:
+      width: 320
+      height: 480
+    color_order: RGB
+    invert_colors: true
+    # The ST77922 is dual-gate and needs 4-pixel alignment. A wrong value
+    # corrupts partial redraws intermittently, which reads exactly like a bus
+    # or clock fault.
+    draw_rounding: 4
+    # Bring up at 0. Rotation belongs in the lvgl: block once LVGL is present;
+    # see es3c35p-lvgl.yaml.
+    rotation: 0
+    update_interval: 1s
+    <<: !include st77922-init-sequence.yaml
+    # --- Test pattern ----------------------------------------------------
+    # Every feature here is >= 8px, so an edge offset is obvious at arm's
+    # length. A 1px border or a 4px stripe is ~0.15mm on this panel and cannot
+    # be judged by eye.
+    lambda: |-
+      const int w = it.get_width();
+      const int h = it.get_height();
+      const int T = 8;    // frame / marker thickness
+      const int L = 60;   // corner marker leg length
+
+      it.fill(Color(0, 0, 0));
+
+      // 8px yellow frame flush with the outer edge. Any row/column offset
+      // shows up as one side being thinner than the opposite side, or absent.
+      it.filled_rectangle(0,     0,     w, T, Color(255, 255, 0));
+      it.filled_rectangle(0,     h - T, w, T, Color(255, 255, 0));
+      it.filled_rectangle(0,     0,     T, h, Color(255, 255, 0));
+      it.filled_rectangle(w - T, 0,     T, h, Color(255, 255, 0));
+
+      // Magenta L-markers inset by the frame width. A clipped corner loses a
+      // leg, which distinguishes a corner gap from an edge offset.
+      it.filled_rectangle(T,         T,         L, T, Color(255, 0, 255));
+      it.filled_rectangle(T,         T,         T, L, Color(255, 0, 255));
+      it.filled_rectangle(w - T - L, T,         L, T, Color(255, 0, 255));
+      it.filled_rectangle(w - T - T, T,         T, L, Color(255, 0, 255));
+      it.filled_rectangle(T,         h - T - T, L, T, Color(255, 0, 255));
+      it.filled_rectangle(T,         h - T - L, T, L, Color(255, 0, 255));
+      it.filled_rectangle(w - T - L, h - T - T, L, T, Color(255, 0, 255));
+      it.filled_rectangle(w - T - T, h - T - L, T, L, Color(255, 0, 255));
+
+      // Centre marker: white box with a red cross, so the geometric centre is
+      // unmistakable in a photograph.
+      it.filled_rectangle(w / 2 - 50, h / 2 - 50, 100, 100, Color(255, 255, 255));
+      it.filled_rectangle(w / 2 - 50, h / 2 - 2,  100, 4,   Color(255, 0, 0));
+      it.filled_rectangle(w / 2 - 2,  h / 2 - 50, 4,   100, Color(255, 0, 0));
+
+      // Colour reference strip: R / G / B / white, left to right. Confirms
+      // colour order and inversion polarity from the same photograph.
+      const int sw = (w - 4 * T) / 4;
+      it.filled_rectangle(T + 0 * sw, T + L + T, sw, 40, Color(255, 0,   0));
+      it.filled_rectangle(T + 1 * sw, T + L + T, sw, 40, Color(0,   255, 0));
+      it.filled_rectangle(T + 2 * sw, T + L + T, sw, 40, Color(0,   0,   255));
+      it.filled_rectangle(T + 3 * sw, T + L + T, sw, 40, Color(255, 255, 255));
+
+# --- I2C -----------------------------------------------------------------
+# One log line settles pin correctness, pull-up adequacy and the touch address.
+# If 0x18 (ES8311) answers and 0x55 does not, the bus is right and touch is
+# held in reset — a GPIO48 problem, not an address problem. Note that a COLD
+# boot legitimately finds only 0x18, because i2c scans before the touchscreen
+# releases the reset line. See ../docs/HARDWARE.md.
+i2c:
+  - id: bus_a
+    sda: GPIO38
+    scl: GPIO39
+    frequency: 400kHz
+    scan: true
+
+# --- Touchscreen ---------------------------------------------------------
+# No interrupt_pin on purpose: keeps the 50ms poller alive and sidesteps the
+# INT-latch unknown. "Failed to read status register" in the log means the
+# reset-timing hazard fired (ESPHome's 5ms pulse + 30ms settle against the
+# datasheet's 100ms TTPRT maximum).
+touchscreen:
+  - platform: st7123
+    id: touch
+    i2c_id: bus_a
+    address: 0x55
+    reset_pin: GPIO48
+    display: lcd
+    on_touch:
+      - lambda: |-
+          ESP_LOGI("touch", "TOUCH x=%d y=%d  x_raw=%d y_raw=%d",
+                   touch.x, touch.y, touch.x_raw, touch.y_raw);
+
+# --- BOOT button ---------------------------------------------------------
+binary_sensor:
+  - platform: gpio
+    id: boot_button
+    name: "BOOT button"
+    pin:
+      number: GPIO0
+      mode:
+        input: true
+        pullup: true
+      inverted: true
+    on_press:
+      - logger.log: "BOOT pressed"
+    on_release:
+      - logger.log: "BOOT released"

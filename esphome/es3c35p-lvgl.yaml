@@ -1,0 +1,205 @@
+# ES3C35P — minimal LVGL configuration
+#
+# Turns the panel's native 320x480 portrait into a 480x320 landscape LVGL
+# canvas with working touch, and does nothing else. It exists to demonstrate
+# the four things about LVGL on this board that are not obvious, all of which
+# are marked THE CONTRACT below:
+#
+#   1. rotation goes in the lvgl: block, never the display block
+#   2. the touchscreen needs no transform: and no calibration:
+#   3. draw_rounding propagates from the display automatically
+#   4. buffer_size wants to be SMALL, not large
+#
+# Requires secrets.yaml with wifi_ssid, wifi_password, api_encryption_key and
+# ota_password. Provenance for every hardware claim: ../docs/HARDWARE.md.
+
+substitutions:
+  name: es3c35p-lvgl
+
+esphome:
+  name: ${name}
+  friendly_name: ES3C35P
+  on_boot:
+    # 600 runs after LEDC output (800) and LightState (799) are up. GPIO41 is
+    # active HIGH and mipi_spi has no backlight support, so the panel stays
+    # dark until something drives it.
+    - priority: 600
+      then:
+        - light.turn_on:
+            id: backlight
+            brightness: 100%
+
+esp32:
+  board: esp32-s3-devkitc-1
+  variant: esp32s3
+  flash_size: 16MB
+  framework:
+    type: esp-idf
+
+# ignore_not_found: false on purpose — ESPHome validates either PSRAM mode
+# without complaint, so only a runtime boot failure proves the mode is wrong.
+psram:
+  mode: octal
+  speed: 80MHz
+  ignore_not_found: false
+
+logger:
+  # Never VERBOSE: it prints the WiFi PSK in clear text.
+  level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+  encryption:
+    key: !secret api_encryption_key
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# ------------------------------------------------------------- hardware
+spi:
+  - id: lcd_bus
+    type: quad
+    clk_pin: GPIO12
+    data_pins: [GPIO11, GPIO13, GPIO14, GPIO9]
+
+i2c:
+  - id: bus_a
+    sda: GPIO38
+    scl: GPIO39
+    frequency: 400kHz
+
+output:
+  - platform: ledc
+    id: backlight_pwm
+    pin: GPIO41          # active HIGH
+    frequency: 1000Hz
+
+light:
+  - platform: monochromatic
+    id: backlight
+    name: "Backlight"
+    output: backlight_pwm
+    restore_mode: ALWAYS_OFF   # on_boot drives it
+
+display:
+  - platform: mipi_spi
+    id: lcd
+    spi_id: lcd_bus
+    model: CUSTOM
+    bus_mode: quad
+    cs_pin: GPIO10
+    data_rate: 40MHz
+    dimensions:
+      width: 320         # NATIVE portrait. Do not swap these.
+      height: 480
+    color_order: RGB
+    invert_colors: true
+    #
+    # THE CONTRACT (3). draw_rounding is inherited by LVGL, which takes the
+    # max() of this and its own value, so it does not need repeating below.
+    #
+    draw_rounding: 4
+    #
+    # THE CONTRACT (1). No rotation: here, and no lambda:, pages:,
+    # auto_clear_enabled: true or show_test_card: true either. LVGL rejects all
+    # of them outright:
+    #
+    #   "use of 'rotation' in the display config is not compatible with LVGL,
+    #    please set rotation in the LVGL config instead"
+    #
+    <<: !include st77922-init-sequence.yaml
+
+# THE CONTRACT (2). No transform: and no calibration:, and that is not an
+# oversight. The touchscreen component caches the display's dimensions in its
+# own call_setup() at priority DATA (600), while LVGL runs at PROCESSOR-5
+# (395) — so it caches the UN-ROTATED 320x480 and reports points in the panel's
+# native frame. LVGL's input-device callback then applies rotate_coordinates().
+# Adding swap_xy here would rotate the point twice.
+#
+# So if touches come out transposed, the fix is not a touchscreen transform —
+# the LVGL rotation direction is wrong. Try the other one.
+touchscreen:
+  - platform: st7123
+    id: touch
+    i2c_id: bus_a
+    address: 0x55
+    reset_pin: GPIO48
+    display: lcd
+
+# ------------------------------------------------------------------ UI
+font:
+  - file: "gfonts://Roboto"
+    id: font_lg
+    size: 40
+  - file: "gfonts://Roboto"
+    id: font_md
+    size: 24
+
+lvgl:
+  displays: [lcd]
+  touchscreens: [touch]
+
+  # THE CONTRACT (1), continued. 480x320 landscape from a 320x480 panel.
+  #
+  # model: CUSTOM is a DriverChip with no declared defaults, so its transform
+  # set is the full {mirror_x, mirror_y, swap_xy} and has_hardware_transform is
+  # true. LVGL therefore selects ROTATION_HARDWARE and calls
+  # display->set_rotation() itself, which lands in mipi_spi's reset_params_()
+  # and rewrites MADCTL at runtime.
+  #
+  # 270 is the value that is correct on this panel, and 90 is not. The ST77922
+  # honours MADCTL MV and ignores MX, so `rotation: 90` (MADCTL 0x60 = MV|MX)
+  # renders a clean, correctly proportioned landscape image that is MIRRORED —
+  # a transpose with the flip dropped. 270 writes 0xA0 = MV|MY, where MY
+  # supplies the flip MX could not, and comes out the right way up. 0xA0 is
+  # also the value the vendor's own Arduino driver computes for landscape.
+  #
+  # TO FORCE SOFTWARE ROTATION instead, add `transform: disabled` to the
+  # display block above. Nothing else changes, and the compile log then reads
+  # `INFO LVGL will use software rotation`. That path is slower — every flushed
+  # rectangle is rotated on the CPU — but correct on any unit.
+  rotation: 270
+
+  # THE CONTRACT (4). 25%, not 100%, and this is a deliberate reversal of the
+  # obvious call. 8MB of PSRAM makes a full 307,200-byte framebuffer trivially
+  # affordable — but LvglComponent::setup() only ATTEMPTS INTERNAL RAM when the
+  # requested fraction is small, so asking for 100% guarantees the draw buffer
+  # lands in PSRAM, where every CPU blend is slower. Drawing is the bottleneck
+  # on this board, not the bus, so the buffer wants to be fast to draw into
+  # rather than large. 25% is 76,800 bytes, fits internal SRAM, and LVGL only
+  # ever redraws dirty rectangles anyway. It falls back to PSRAM on its own if
+  # internal allocation fails.
+  buffer_size: 25%
+
+  pages:
+    - id: main_page
+      widgets:
+        - label:
+            align: TOP_MID
+            y: 24
+            text_font: font_lg
+            text: "ES3C35P"
+        - label:
+            id: readout
+            align: CENTER
+            text_font: font_md
+            text: "touch the button"
+        - button:
+            align: BOTTOM_MID
+            y: -24
+            width: 200
+            height: 64
+            widgets:
+              - label:
+                  align: CENTER
+                  text_font: font_md
+                  text: "press"
+            on_click:
+              - lvgl.label.update:
+                  id: readout
+                  text: "touch works"
