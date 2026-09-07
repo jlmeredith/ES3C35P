@@ -1,0 +1,18 @@
+secrets.yaml
+.esphome/
+.DS_Store
+.owner
+
+# Firmware images are never committed. The factory image read off this board is
+# LCDwiki's compiled firmware and carries no redistribution licence;
+# docs/HARDWARE.md publishes its sha256 and the byte offsets every claim was
+# decoded from instead.
+*.bin
+backup/
+
+# Home Assistant dashboard layer — a room-by-room inventory of a specific
+# house's entities and the files generated from it. Not publishable.
+esphome/rooms.yaml
+esphome/generate.py
+esphome/generated_*.yaml
+esphome/preview.*
